@@ -1,6 +1,0 @@
-# Bit-true fixed-point simulation output for Matrix(:,:,8)
-# Format: signed Q6.14 integer values
-eigenvalues 41 21298 118652
-vrow0 13376 9311 1635
-vrow1 -8875 13347 -3369
-vrow2 3240 -1872 -15939
