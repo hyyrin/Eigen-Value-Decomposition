@@ -1,0 +1,11 @@
+{
+  "selected_wordlength": 20,
+  "selected_int_bits": 6,
+  "selected_frac_bits": 14,
+  "selected_cordic_stages": 14,
+  "selected_qr_iterations": 7,
+  "cordic_gain_K": 1.6467602540312922,
+  "scaling_factor_K_inv": 0.6072529365170103,
+  "scaling_factor_K_inv_q": 9949,
+  "fixed_point_format": "Q6.14"
+}

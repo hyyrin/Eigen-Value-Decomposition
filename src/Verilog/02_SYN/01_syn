@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+# Run this directory after typing `cb` on ADFP.
+rm -rf Report Netlist command.log default.svf filenames.log
+mkdir -p Report Netlist
+
+dc_shell -f syn.tcl | tee synthesis.log

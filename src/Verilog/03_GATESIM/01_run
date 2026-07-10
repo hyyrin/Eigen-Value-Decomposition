@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -e
+
+# Run this directory after synthesis and after typing `cb` on ADFP.
+# Output: EVD_QR_gate.fsdb and hw_output_matrix8_q6_14.txt
+
+if [ ! -f ../02_SYN/Netlist/EVD_QR_syn.v ]; then
+    echo "ERROR: ../02_SYN/Netlist/EVD_QR_syn.v not found. Run synthesis first."
+    exit 1
+fi
+if [ ! -f ../02_SYN/Netlist/EVD_QR_syn.sdf ]; then
+    echo "ERROR: ../02_SYN/Netlist/EVD_QR_syn.sdf not found. Run synthesis first."
+    exit 1
+fi
+
+PLI_OPTS=""
+if [ -n "$VERDI_HOME" ] && [ -f "$VERDI_HOME/share/PLI/VCS/LINUX64/novas.tab" ]; then
+    PLI_OPTS="-P $VERDI_HOME/share/PLI/VCS/LINUX64/novas.tab $VERDI_HOME/share/PLI/VCS/LINUX64/pli.a"
+elif [ -n "$NOVAS_HOME" ] && [ -f "$NOVAS_HOME/share/PLI/VCS/LINUX64/novas.tab" ]; then
+    PLI_OPTS="-P $NOVAS_HOME/share/PLI/VCS/LINUX64/novas.tab $NOVAS_HOME/share/PLI/VCS/LINUX64/pli.a"
+fi
+
+rm -rf csrc simv simv.daidir ucli.key *.log *.fsdb hw_output_matrix8_q6_14.txt
+vcs -full64 -sverilog -debug_access+all +define+GATE +neg_tchk $PLI_OPTS -f file.f -l vcs_compile.log
+./simv -l simv_run.log

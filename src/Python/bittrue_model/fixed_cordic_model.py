@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""
+Fixed-point CORDIC bit-true model for DSP in VLSI Final Project.
+
+Target:
+  - 3x3 real symmetric matrix EVD by iterative QR operations.
+  - QR decomposition by Givens rotations.
+  - Each Givens rotation is implemented by fixed-point CORDIC:
+      vectoring mode  : generate micro-rotation directions
+      rotation mode   : apply the same directions to other data
+      scaling factor  : one post-CORDIC multiplication by K_inv
+
+The model is intentionally written in a hardware-friendly style:
+  - integer fixed-point arithmetic
+  - explicit saturation
+  - explicit arithmetic right shifts
+  - fixed number of CORDIC stages
+  - fixed number of QR iterations
+
+Default selected setting:
+  WL = 20, INT_BITS = 6, FRAC_BITS = 14
+  CORDIC_STAGES = 14
+  QR_ITERS = 7
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple
+import math
+import numpy as np
+
+
+def rmse(a: np.ndarray, b: np.ndarray) -> float:
+    """Root mean square error."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    return float(np.sqrt(np.mean((a - b) ** 2)))
+
+
+def sign_align_vectors(vecs: np.ndarray, ref_vecs: np.ndarray) -> np.ndarray:
+    """
+    Align eigenvector signs before RMSE comparison.
+    For any eigenvector v, both v and -v are valid.
+    """
+    out = np.asarray(vecs, dtype=float).copy()
+    for j in range(out.shape[1]):
+        if np.dot(out[:, j], ref_vecs[:, j]) < 0:
+            out[:, j] *= -1.0
+    return out
+
+
+def sort_and_align(vals: np.ndarray,
+                   vecs: np.ndarray,
+                   ref_vals: np.ndarray,
+                   ref_vecs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Sort eigenvalues in ascending order and reorder the corresponding eigenvectors.
+    Then align eigenvector signs with the reference eigenvectors.
+    """
+    idx = np.argsort(vals)
+    vals_sorted = np.asarray(vals, dtype=float)[idx]
+    vecs_sorted = np.asarray(vecs, dtype=float)[:, idx]
+    vecs_aligned = sign_align_vectors(vecs_sorted, ref_vecs)
+    return vals_sorted, vecs_aligned
+
+
+def _sat_int(x: int, wl: int) -> int:
+    """Saturate integer x to signed two's-complement range with wl bits."""
+    mn = -(1 << (wl - 1))
+    mx = (1 << (wl - 1)) - 1
+    if x < mn:
+        return mn
+    if x > mx:
+        return mx
+    return int(x)
+
+
+def _round_shift(x: int, sh: int) -> int:
+    """
+    Signed round-to-nearest shift.
+    Equivalent to round(x / 2^sh), but deterministic for integers.
+    """
+    if sh <= 0:
+        return int(x) << (-sh)
+    if x >= 0:
+        return (int(x) + (1 << (sh - 1))) >> sh
+    return -(((-int(x)) + (1 << (sh - 1))) >> sh)
+
+
+@dataclass(frozen=True)
+class FixedConfig:
+    """Fixed-point and CORDIC parameters."""
+    wl: int = 20
+    int_bits: int = 6
+    stages: int = 14
+
+    @property
+    def frac_bits(self) -> int:
+        return self.wl - self.int_bits
+
+    @property
+    def scale(self) -> int:
+        return 1 << self.frac_bits
+
+    @property
+    def cordic_gain(self) -> float:
+        k = 1.0
+        for i in range(self.stages):
+            k *= math.sqrt(1.0 + 2.0 ** (-2 * i))
+        return k
+
+    @property
+    def cordic_k_inv(self) -> float:
+        return 1.0 / self.cordic_gain
+
+    @property
+    def cordic_k_inv_q(self) -> int:
+        return int(round(self.cordic_k_inv * self.scale))
+
+    def quantize(self, x: float) -> int:
+        return _sat_int(int(round(float(x) * self.scale)), self.wl)
+
+    def dequantize(self, q: int) -> float:
+        return float(q) / float(self.scale)
+
+    def sat(self, x: int) -> int:
+        return _sat_int(int(x), self.wl)
+
+    def mul_q(self, a: int, b: int) -> int:
+        """Fixed-point multiplication with saturation."""
+        return self.sat(_round_shift(int(a) * int(b), self.frac_bits))
+
+    def apply_k_inv(self, x: int) -> int:
+        """Post-CORDIC scaling compensation."""
+        return self.sat(_round_shift(int(x) * self.cordic_k_inv_q,
+                                     self.frac_bits))
+
+
+def cordic_vectoring(x: int, y: int, cfg: FixedConfig) -> Tuple[int, int, List[int]]:
+    """
+    Vectoring mode for rotation matrix:
+        [ c  s] [x] = [r]
+        [-s  c] [y]   [0]
+
+    The direction bits are recorded and reused by rotation mode.
+    """
+    xi, yi = int(x), int(y)
+    dirs: List[int] = []
+
+    # The QR pivots in this project are positive for the selected SPD patterns.
+    # Therefore atan(y/x) is within the normal circular CORDIC convergence range.
+    for i in range(cfg.stages):
+        d = 1 if yi >= 0 else -1
+        x_next = xi + d * (yi >> i)
+        y_next = yi - d * (xi >> i)
+        xi = cfg.sat(x_next)
+        yi = cfg.sat(y_next)
+        dirs.append(d)
+
+    return cfg.apply_k_inv(xi), cfg.apply_k_inv(yi), dirs
+
+
+def cordic_rotation(x: int, y: int, dirs: List[int], cfg: FixedConfig) -> Tuple[int, int]:
+    """Rotation mode using the direction bits generated by vectoring mode."""
+    xi, yi = int(x), int(y)
+
+    for i, d in enumerate(dirs):
+        x_next = xi + d * (yi >> i)
+        y_next = yi - d * (xi >> i)
+        xi = cfg.sat(x_next)
+        yi = cfg.sat(y_next)
+
+    return cfg.apply_k_inv(xi), cfg.apply_k_inv(yi)
+
+
+def qmatmul(A: np.ndarray, B: np.ndarray, cfg: FixedConfig) -> np.ndarray:
+    """Fixed-point matrix multiplication."""
+    A = np.asarray(A, dtype=object)
+    B = np.asarray(B, dtype=object)
+    C = np.zeros((A.shape[0], B.shape[1]), dtype=object)
+
+    for i in range(A.shape[0]):
+        for j in range(B.shape[1]):
+            acc = 0
+            for k in range(A.shape[1]):
+                acc += int(A[i, k]) * int(B[k, j])
+            C[i, j] = cfg.sat(_round_shift(acc, cfg.frac_bits))
+
+    return C
+
+
+def qr_decomp_cordic_fixed(Aq: np.ndarray,
+                           cfg: FixedConfig,
+                           force_eliminated_zero: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    3x3 QR decomposition by fixed-point CORDIC Givens rotations.
+
+    Returns:
+      Q, R such that A ~= Q R.
+    Internally:
+      R = Q^T A, where Q^T is obtained by applying the row rotations.
+    """
+    R = np.asarray(Aq, dtype=object).copy()
+    QT = np.zeros((3, 3), dtype=object)
+    for i in range(3):
+        QT[i, i] = cfg.quantize(1.0)
+
+    # For 3x3 QR, eliminate R[1,0], R[2,0], and R[2,1].
+    # This order matches the usual Givens QR data dependence.
+    for col, row in [(0, 1), (0, 2), (1, 2)]:
+        _, _, dirs = cordic_vectoring(R[col, col], R[row, col], cfg)
+
+        # Apply Givens rotation to R rows.
+        for j in range(3):
+            x_new, y_new = cordic_rotation(R[col, j], R[row, j], dirs, cfg)
+            R[col, j] = x_new
+            R[row, j] = 0 if (force_eliminated_zero and j == col) else y_new
+
+        # Apply the same row rotation to Q^T.
+        for j in range(3):
+            x_new, y_new = cordic_rotation(QT[col, j], QT[row, j], dirs, cfg)
+            QT[col, j] = x_new
+            QT[row, j] = y_new
+
+    Q = QT.T.copy()
+    return Q, R
+
+
+def iterative_qr_evd_fixed(A: np.ndarray,
+                           cfg: FixedConfig,
+                           qr_iters: int = 7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Fixed-point iterative QR EVD.
+
+    Returns:
+      eigenvalues from diagonal of A after QR iterations,
+      accumulated eigenvectors,
+      final quasi-diagonal A.
+    """
+    Acur = np.vectorize(cfg.quantize)(np.asarray(A, dtype=float)).astype(object)
+
+    U = np.zeros((3, 3), dtype=object)
+    for i in range(3):
+        U[i, i] = cfg.quantize(1.0)
+
+    for _ in range(qr_iters):
+        Q, R = qr_decomp_cordic_fixed(Acur, cfg)
+        Acur = qmatmul(R, Q, cfg)
+        U = qmatmul(U, Q, cfg)
+
+    vals = np.array([cfg.dequantize(Acur[i, i]) for i in range(3)], dtype=float)
+    vecs = np.vectorize(cfg.dequantize)(U.astype(object)).astype(float)
+    Afinal = np.vectorize(cfg.dequantize)(Acur.astype(object)).astype(float)
+    return vals, vecs, Afinal
+
+
+def evaluate_patterns(Matrix: np.ndarray,
+                      cfg: FixedConfig,
+                      qr_iters: int = 7) -> Tuple[np.ndarray, np.ndarray]:
+    """Evaluate eigenvalue/eigenvector RMSE for all patterns in Matrix[:,:,k]."""
+    eig_rmse = []
+    vec_rmse = []
+
+    for k in range(Matrix.shape[2]):
+        A = Matrix[:, :, k].astype(float)
+        ref_vals, ref_vecs = np.linalg.eigh(A)
+        vals, vecs, _ = iterative_qr_evd_fixed(A, cfg, qr_iters)
+        vals_sorted, vecs_aligned = sort_and_align(vals, vecs, ref_vals, ref_vecs)
+        eig_rmse.append(rmse(vals_sorted, ref_vals))
+        vec_rmse.append(rmse(vecs_aligned, ref_vecs))
+
+    return np.asarray(eig_rmse), np.asarray(vec_rmse)
+
+
+def load_matrix_mat(path: str) -> np.ndarray:
+    """Load Final11Pattern.mat."""
+    import scipy.io
+    data = scipy.io.loadmat(path)
+    if "Matrix" not in data:
+        raise KeyError("Cannot find variable 'Matrix' in .mat file.")
+    Matrix = np.asarray(data["Matrix"], dtype=float)
+    if Matrix.shape != (3, 3, 11):
+        raise ValueError(f"Expected Matrix shape (3,3,11), got {Matrix.shape}")
+    return Matrix
