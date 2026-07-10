@@ -1,36 +1,5 @@
 `timescale 1ns/1ps
 
-// -----------------------------------------------------------------------------
-// DSP in VLSI Final Project
-// EVD by iterative QR operations, optimized similarity-rotation architecture.
-//
-// Key architectural difference from the previous qmac3 implementation:
-//   A_{k+1} = R Q = Q_k^T A_k Q_k is implemented by CORDIC row rotations
-//   followed by the matching CORDIC column rotations. Therefore the explicit
-//   3x3 RQ and UQ matrix multipliers are removed.
-//
-// Each Givens rotation is scheduled with a low-latency row/column scheme:
-//   1) ROW: vectoring direction generation and row rotation are evaluated in
-//      the same cycle. This removes the separate VECTOR cycle.
-//   2) COL: apply the matching column rotation to A.
-//
-// This reduces one QR iteration from 9 cycles to about 6 cycles. The trade-off
-// is a longer ROW-state critical path, so the final AT product should be checked
-// by synthesis timing.
-//
-// One vectoring CORDIC and six rotation CORDIC datapaths are reused across all
-// Givens rotations and all QR iterations. This keeps M around O(9*QR_ITERS)
-// while avoiding the very large combinational QR/matrix-multiply chain.
-//
-// Interface follows the project specification.
-// Input and output values are signed Q6.14 fixed-point.
-// -----------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------
-// Combinational CORDIC vectoring unit.
-// STAGES is fixed by parameter. In the unrolled loop, each shift amount i is a
-// compile-time constant, so no dynamic barrel shifter is inferred.
-// -----------------------------------------------------------------------------
 module cordic_vector_comb #(
     parameter W         = 20,
     parameter FRAC_BITS = 14,
